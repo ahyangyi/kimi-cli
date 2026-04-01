@@ -155,13 +155,13 @@ def _apply_inline_diff(
     colors = get_diff_colors()
     paired = min(len(del_lines), len(add_lines))
     for j in range(paired):
-        old_code = del_lines[j].code
-        new_code = add_lines[j].code
-        sm = SequenceMatcher(None, old_code, new_code)
+        old_text = _highlight(highlighter, del_lines[j].code)
+        new_text = _highlight(highlighter, add_lines[j].code)
+        # Compare the highlighted plain text so offsets match the Text objects
+        # (highlighting may expand tabs, so raw .code offsets would be wrong).
+        sm = SequenceMatcher(None, old_text.plain, new_text.plain)
         if sm.ratio() < _INLINE_DIFF_MIN_RATIO:
             continue
-        old_text = _highlight(highlighter, old_code)
-        new_text = _highlight(highlighter, new_code)
         for op, i1, i2, j1, j2 in sm.get_opcodes():
             if op in ("delete", "replace"):
                 old_text.stylize(colors.del_hl, i1, i2)

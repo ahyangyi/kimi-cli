@@ -163,6 +163,38 @@ class TestHighlightHunk:
         # 3rd delete not paired
         assert not deletes[2].is_inline_paired
 
+    def test_inline_diff_with_tabs(self) -> None:
+        """Inline highlight offsets must account for tab-to-space expansion."""
+        old = "\told_value = 1"
+        new = "\tnew_value = 2"
+        hunks = _build_diff_lines(old, new, 1, 1)
+        hl = _make_highlighter("test.py")
+        _highlight_hunk(hl, hunks[0])
+        deletes = [dl for dl in hunks[0] if dl.kind == DiffLineKind.DELETE]
+        adds = [dl for dl in hunks[0] if dl.kind == DiffLineKind.ADD]
+        assert deletes[0].is_inline_paired
+        assert adds[0].is_inline_paired
+        del_plain = deletes[0].content.plain
+        add_plain = adds[0].content.plain
+        assert "old_value" in del_plain
+        assert "new_value" in add_plain
+        # Verify the highlight spans cover the actual changed words,
+        # not characters shifted by unexpanded-tab offsets.
+        from kimi_cli.utils.rich.diff_render import get_diff_colors
+
+        colors = get_diff_colors()
+        del_hl_spans = [
+            (s.start, s.end) for s in deletes[0].content._spans if s.style == colors.del_hl
+        ]
+        add_hl_spans = [
+            (s.start, s.end) for s in adds[0].content._spans if s.style == colors.add_hl
+        ]
+        # The highlighted region in the old line must cover "old" (from old_value)
+        del_highlighted = "".join(del_plain[s:e] for s, e in del_hl_spans)
+        add_highlighted = "".join(add_plain[s:e] for s, e in add_hl_spans)
+        assert "old" in del_highlighted, f"expected 'old' in highlighted text: {del_highlighted!r}"
+        assert "new" in add_highlighted, f"expected 'new' in highlighted text: {add_highlighted!r}"
+
 
 # ---------------------------------------------------------------------------
 # collect_diff_hunks
