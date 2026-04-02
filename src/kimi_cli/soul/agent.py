@@ -21,6 +21,7 @@ from kimi_cli.exception import MCPConfigError, SystemPromptTemplateError
 from kimi_cli.llm import LLM
 from kimi_cli.notifications import NotificationManager
 from kimi_cli.session import Session
+from kimi_cli.share import get_share_dir
 from kimi_cli.skill import (
     Skill,
     discover_skills_from_roots,
@@ -98,20 +99,36 @@ async def _dirs_root_to_leaf(work_dir: KaosPath, project_root: KaosPath) -> list
     return dirs
 
 
+async def _load_global_agents_md() -> tuple[Path, str] | None:
+    """Load ``AGENTS.md`` from the global share directory (``~/.kimi/``)."""
+    share_dir = get_share_dir()
+    for name in ("AGENTS.md", "agents.md"):
+        path = share_dir / name
+        if path.is_file():
+            content = path.read_text().strip()
+            if content:
+                logger.info("Loaded global agents.md: {path}", path=path)
+                return path, content
+    return None
+
+
 async def load_agents_md(work_dir: KaosPath) -> str | None:
-    """Discover and merge ``AGENTS.md`` files from the project root down to *work_dir*.
+    """Discover and merge ``AGENTS.md`` files from the global share directory and
+    the project root down to *work_dir*.
 
-    For each directory on the path, the following candidates are checked in order:
+    Sources are loaded in the following order (earliest → latest):
 
-    1. ``.kimi/AGENTS.md``  — project-local kimi config (highest priority)
-    2. ``AGENTS.md``        — standard location
-    3. ``agents.md``        — lowercase variant (mutually exclusive with 2)
+    0. Global share directory (``~/.kimi/AGENTS.md``) — user-wide defaults
+    1. For each directory from project root to *work_dir*:
+       a. ``.kimi/AGENTS.md``  — project-local kimi config
+       b. ``AGENTS.md``        — standard location
+       c. ``agents.md``        — lowercase variant (mutually exclusive with b)
 
     Within a single directory, ``.kimi/AGENTS.md`` and ``AGENTS.md``/``agents.md``
     are **both** loaded (with ``.kimi/`` first), but ``AGENTS.md`` and ``agents.md``
     are mutually exclusive (uppercase wins).
 
-    All discovered files are concatenated root→leaf, separated by ``\\n\\n``, with
+    All discovered files are concatenated in order, separated by ``\\n\\n``, with
     source annotations.  Total size is capped at :data:`_AGENTS_MD_MAX_BYTES`.
     Budget is allocated leaf-first so deeper (more specific) files are never
     truncated in favour of shallower ones.
@@ -119,8 +136,21 @@ async def load_agents_md(work_dir: KaosPath) -> str | None:
     project_root = await _find_project_root(work_dir)
     dirs = await _dirs_root_to_leaf(work_dir, project_root)
 
-    # Phase 1: collect all candidate files (root → leaf order)
+    # Phase 1: collect all candidate files (global + root → leaf order)
     discovered: list[tuple[KaosPath, str]] = []  # (path, content)
+
+    # Global share dir (~/.kimi/AGENTS.md)
+    share_dir = get_share_dir()
+    share_kaos = KaosPath(str(share_dir))
+    # Skip global file if the share dir is the same as or within the project
+    # hierarchy (it will be picked up by the directory walk below).
+    share_in_project = any(share_kaos == d for d in dirs)
+    if not share_in_project:
+        global_result = await _load_global_agents_md()
+        if global_result is not None:
+            path, content = global_result
+            discovered.append((KaosPath(str(path)), content))
+    # Project hierarchy (root → leaf)
     for d in dirs:
         # .kimi/AGENTS.md is always checked independently (can coexist with root-level file)
         kimi_path = d / ".kimi" / "AGENTS.md"
@@ -205,6 +235,8 @@ class Runtime:
     root_wire_hub: RootWireHub | None = None
     subagent_id: str | None = None
     subagent_type: str | None = None
+    agents_md: str = ""
+    """Raw merged AGENTS.md content (for reuse outside the system prompt)."""
     role: Literal["root", "subagent"] = "root"
     hook_engine: Any = None
     """HookEngine instance, set by KimiCLI after soul creation."""
@@ -308,6 +340,23 @@ class Runtime:
             config.notifications,
         )
 
+        # For openai_responses provider, pass KIMI_AGENTS_MD via the `instructions`
+        # parameter instead of embedding it in the system prompt.
+        agents_md_in_prompt = agents_md or ""
+        if (
+            llm
+            and llm.provider_config
+            and llm.provider_config.type == "openai_responses"
+            and agents_md
+        ):
+            from kosong.contrib.chat_provider.openai_responses import OpenAIResponses
+
+            if isinstance(llm.chat_provider, OpenAIResponses):
+                llm.chat_provider = llm.chat_provider.with_generation_kwargs(
+                    instructions=agents_md,
+                )
+                agents_md_in_prompt = ""
+
         return Runtime(
             config=config,
             oauth=oauth,
@@ -317,12 +366,13 @@ class Runtime:
                 KIMI_NOW=datetime.now().astimezone().isoformat(),
                 KIMI_WORK_DIR=session.work_dir,
                 KIMI_WORK_DIR_LS=ls_output,
-                KIMI_AGENTS_MD=agents_md or "",
+                KIMI_AGENTS_MD=agents_md_in_prompt,
                 KIMI_SKILLS=skills_formatted or "No skills found.",
                 KIMI_ADDITIONAL_DIRS_INFO=additional_dirs_info,
                 KIMI_OS=environment.os_kind,
                 KIMI_SHELL=f"{environment.shell_name} (`{environment.shell_path}`)",
             ),
+            agents_md=agents_md or "",
             denwa_renji=DenwaRenji(),
             approval=Approval(state=approval_state),
             labor_market=LaborMarket(),

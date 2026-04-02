@@ -1,8 +1,22 @@
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
+
+import pytest
 from kaos.path import KaosPath
 
 from kimi_cli.soul.agent import _AGENTS_MD_MAX_BYTES, load_agents_md
+
+
+@pytest.fixture(autouse=True)
+def _isolated_share_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Point KIMI_SHARE_DIR to an empty temp directory so tests never pick up
+    the real ~/.kimi/AGENTS.md from the host machine."""
+    share_dir = tmp_path / "isolated_share"
+    share_dir.mkdir()
+    monkeypatch.setenv("KIMI_SHARE_DIR", str(share_dir))
+
 
 # ---------------------------------------------------------------------------
 # Basic loading
@@ -174,3 +188,77 @@ async def test_max_bytes_leaf_prioritised(temp_work_dir: KaosPath):
     assert content.count("A") < root_size
     # Total output (including annotations) must not exceed the limit
     assert len(content.encode()) <= _AGENTS_MD_MAX_BYTES
+
+
+# ---------------------------------------------------------------------------
+# Global share directory (~/.kimi/AGENTS.md)
+# ---------------------------------------------------------------------------
+
+
+async def test_global_agents_md_loaded(monkeypatch: pytest.MonkeyPatch, temp_work_dir: KaosPath):
+    """Global AGENTS.md from share dir is loaded when no project file exists."""
+    with tempfile.TemporaryDirectory() as share:
+        monkeypatch.setenv("KIMI_SHARE_DIR", share)
+        Path(share, "AGENTS.md").write_text("Global instructions")
+
+        content = await load_agents_md(temp_work_dir)
+
+    assert content is not None
+    assert "Global instructions" in content
+    assert content.count("<!-- From:") == 1
+
+
+async def test_global_and_project_combined(
+    monkeypatch: pytest.MonkeyPatch, temp_work_dir: KaosPath
+):
+    """Both global and project AGENTS.md are loaded; global comes first."""
+    with tempfile.TemporaryDirectory() as share:
+        monkeypatch.setenv("KIMI_SHARE_DIR", share)
+        Path(share, "AGENTS.md").write_text("Global instructions")
+        await (temp_work_dir / "AGENTS.md").write_text("Project instructions")
+
+        content = await load_agents_md(temp_work_dir)
+
+    assert content is not None
+    assert "Global instructions" in content
+    assert "Project instructions" in content
+    assert content.index("Global instructions") < content.index("Project instructions")
+    assert content.count("<!-- From:") == 2
+
+
+async def test_global_skipped_when_share_dir_is_work_dir(
+    monkeypatch: pytest.MonkeyPatch, temp_work_dir: KaosPath
+):
+    """Global file is not double-loaded when share dir equals work dir."""
+    monkeypatch.setenv("KIMI_SHARE_DIR", str(temp_work_dir))
+    await (temp_work_dir / "AGENTS.md").write_text("Same dir content")
+
+    content = await load_agents_md(temp_work_dir)
+
+    assert content is not None
+    assert "Same dir content" in content
+    # Only one entry — global loading should be skipped since share_dir == work_dir
+    assert content.count("<!-- From:") == 1
+
+
+async def test_global_agents_md_lowercase(monkeypatch: pytest.MonkeyPatch, temp_work_dir: KaosPath):
+    """Global agents.md (lowercase) is loaded from share dir."""
+    with tempfile.TemporaryDirectory() as share:
+        monkeypatch.setenv("KIMI_SHARE_DIR", share)
+        Path(share, "agents.md").write_text("Global lowercase")
+
+        content = await load_agents_md(temp_work_dir)
+
+    assert content is not None
+    assert "Global lowercase" in content
+
+
+async def test_global_empty_file_skipped(monkeypatch: pytest.MonkeyPatch, temp_work_dir: KaosPath):
+    """Empty global AGENTS.md is skipped."""
+    with tempfile.TemporaryDirectory() as share:
+        monkeypatch.setenv("KIMI_SHARE_DIR", share)
+        Path(share, "AGENTS.md").write_text("   ")
+
+        content = await load_agents_md(temp_work_dir)
+
+    assert content is None

@@ -107,6 +107,7 @@ class OpenAIResponses:
     name = "openai-responses"
 
     class GenerationKwargs(TypedDict, total=False):
+        instructions: str | None
         max_output_tokens: int | None
         max_tool_calls: int | None
         reasoning_effort: ReasoningEffort | None
