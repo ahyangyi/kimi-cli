@@ -35,6 +35,7 @@ from kimi_cli.tools.background import (
     TaskOutput,
     TaskStop,
 )
+from kimi_cli.tools.context import RecallCompactedContext
 from kimi_cli.tools.dmail import SendDMail
 from kimi_cli.tools.file.glob import Glob
 from kimi_cli.tools.file.grep_local import Grep
@@ -327,6 +328,12 @@ def search_web_tool(config: Config, runtime: Runtime) -> SearchWeb:
 def fetch_url_tool(config: Config, runtime: Runtime) -> FetchURL:
     """Create a FetchURL tool instance."""
     return FetchURL(config, runtime)
+
+
+@pytest.fixture
+def recall_compacted_context_tool(runtime: Runtime) -> RecallCompactedContext:
+    """Create a RecallCompactedContext tool instance."""
+    return RecallCompactedContext(runtime)
 
 
 # misc fixtures
