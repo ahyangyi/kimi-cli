@@ -83,6 +83,7 @@ def test_pyinstaller_datas():
         ),
         ("src/kimi_cli/tools/agent/description.md", "kimi_cli/tools/agent"),
         ("src/kimi_cli/tools/ask_user/description.md", "kimi_cli/tools/ask_user"),
+        ("src/kimi_cli/tools/context/description.md", "kimi_cli/tools/context"),
         (
             "src/kimi_cli/tools/dmail/dmail.md",
             "kimi_cli/tools/dmail",
@@ -150,6 +151,8 @@ def test_pyinstaller_hiddenimports():
             "kimi_cli.tools.agent",
             "kimi_cli.tools.ask_user",
             "kimi_cli.tools.background",
+            "kimi_cli.tools.context",
+            "kimi_cli.tools.context.recall_compacted",
             "kimi_cli.tools.display",
             "kimi_cli.tools.dmail",
             "kimi_cli.tools.file",
