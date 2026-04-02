@@ -83,6 +83,12 @@ class LoopControl(BaseModel):
     """Reserved token count for LLM response generation. Auto-compaction triggers when
     either context_tokens + reserved_context_size >= max_context_size or
     context_tokens >= max_context_size * compaction_trigger_ratio. Default is 50000."""
+    max_preserved_messages: int = Field(default=2, ge=1)
+    """Number of recent user turns to preserve during compaction. Each turn
+    includes the user message and all subsequent assistant/tool messages."""
+    auto_compact_enabled: bool = Field(default=True)
+    """Whether auto-compaction is enabled. When disabled, compaction can only
+    be triggered manually via /compact."""
     compaction_trigger_ratio: float = Field(default=0.85, ge=0.5, le=0.99)
     """Context usage ratio threshold for auto-compaction. Default is 0.85 (85%).
     Auto-compaction triggers when context_tokens >= max_context_size * compaction_trigger_ratio

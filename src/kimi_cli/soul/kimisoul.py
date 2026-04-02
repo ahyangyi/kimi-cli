@@ -52,6 +52,11 @@ from kimi_cli.soul.compaction import (
     estimate_text_tokens,
     should_auto_compact,
 )
+from kimi_cli.soul.compaction_archive import (
+    build_compaction_summary,
+    load_compaction_archives,
+    register_compaction_archive,
+)
 from kimi_cli.soul.context import Context
 from kimi_cli.soul.dynamic_injection import (
     DynamicInjection,
@@ -60,7 +65,13 @@ from kimi_cli.soul.dynamic_injection import (
 )
 from kimi_cli.soul.dynamic_injections.plan_mode import PlanModeInjectionProvider
 from kimi_cli.soul.dynamic_injections.yolo_mode import YoloModeInjectionProvider
-from kimi_cli.soul.message import check_message, system, system_reminder, tool_result_to_message
+from kimi_cli.soul.message import (
+    check_message,
+    internal_user_message,
+    system,
+    system_reminder,
+    tool_result_to_message,
+)
 from kimi_cli.soul.slash import registry as soul_slash_registry
 from kimi_cli.soul.toolset import KimiToolset
 from kimi_cli.tools.dmail import NAME as SendDMail_NAME
@@ -136,7 +147,10 @@ class KimiSoul:
         self._approval = agent.runtime.approval
         self._context = context
         self._loop_control = agent.runtime.config.loop_control
-        self._compaction = SimpleCompaction()  # TODO: maybe configurable and composable
+        self._compaction = SimpleCompaction(
+            max_preserved_messages=self._loop_control.max_preserved_messages,
+        )
+        self._last_compaction_turn: int | None = None
 
         for tool in agent.toolset.tools:
             if tool.name == SendDMail_NAME:
@@ -167,6 +181,7 @@ class KimiSoul:
 
         # Bind plan mode state to tools that support it
         self._bind_plan_mode_tools()
+        self._bind_context_recall_tools()
 
         self._slash_commands = self._build_slash_commands()
         self._slash_command_map = self._index_slash_commands(self._slash_commands)
@@ -267,6 +282,29 @@ class KimiSoul:
         ask_tool = self._agent.toolset.find("AskUserQuestion")
         if isinstance(ask_tool, AskUserQuestion):
             ask_tool.bind_approval(self._approval.is_yolo)
+
+    def _bind_context_recall_tools(self) -> None:
+        """Late-bind the context file getter for RecallCompactedContext."""
+        if not isinstance(self._agent.toolset, KimiToolset):
+            return
+        from kimi_cli.tools.context import RecallCompactedContext
+
+        recall_tool = self._agent.toolset.find("RecallCompactedContext")
+        if isinstance(recall_tool, RecallCompactedContext):
+            recall_tool.bind_context_file(lambda: self._context.file_backend)
+            self._sync_context_recall_tool_visibility()
+
+    def _sync_context_recall_tool_visibility(self) -> None:
+        """Show RecallCompactedContext only when trajectory archives actually exist."""
+        if not isinstance(self._agent.toolset, KimiToolset):
+            return
+        recall_tool = self._agent.toolset.find("RecallCompactedContext")
+        if recall_tool is None:
+            return
+        if load_compaction_archives(self._context.file_backend):
+            self._agent.toolset.unhide("RecallCompactedContext")
+        else:
+            self._agent.toolset.hide("RecallCompactedContext")
 
     def _ensure_plan_session_id(self) -> None:
         """Allocate a stable plan session ID on first activation."""
@@ -687,14 +725,26 @@ class KimiSoul:
             step_outcome: StepOutcome | None = None
             try:
                 # compact the context if needed
-                if should_auto_compact(
+                if self._loop_control.auto_compact_enabled and should_auto_compact(
                     self._context.token_count_with_pending,
                     self._runtime.llm.max_context_size,
                     trigger_ratio=self._loop_control.compaction_trigger_ratio,
                     reserved_context_size=self._loop_control.reserved_context_size,
                 ):
-                    logger.info("Context too long, compacting...")
-                    await self.compact_context()
+                    if (
+                        self._last_compaction_turn is not None
+                        and step_no - self._last_compaction_turn < 2
+                    ):
+                        logger.debug("Skipping auto-compaction (cooldown)")
+                    else:
+                        logger.info("Context too long, compacting...")
+                        try:
+                            await self.compact_context()
+                            self._last_compaction_turn = step_no
+                        except Exception:
+                            logger.opt(exception=True).warning(
+                                "Auto-compaction failed, continuing without compaction"
+                            )
 
                 logger.debug("Beginning step {step_no}", step_no=step_no)
                 await self._checkpoint()
@@ -966,33 +1016,90 @@ class KimiSoul:
         )
 
         wire_send(CompactionBegin())
-        compaction_result = await _compact_with_retry()
-        await self._context.clear()
-        await self._context.write_system_prompt(self._agent.system_prompt)
-        await self._checkpoint()
-        await self._context.append_message(compaction_result.messages)
-        estimated_token_count = compaction_result.estimated_token_count
+        try:
+            original_message_count = len(self._context.history)
+            compaction_result = await _compact_with_retry()
+            rotated_path = await self._context.clear()
+            await self._context.write_system_prompt(self._agent.system_prompt)
 
-        if self._runtime.role == "root":
-            active_task_snapshot = build_active_task_snapshot(self._runtime.background_tasks)
-            if active_task_snapshot is not None:
-                active_task_message = Message(
-                    role="user",
-                    content=[
-                        system(
-                            "The following background tasks are still active after compaction. "
-                            "Use TaskList if you need to re-enumerate them later."
-                        ),
-                        TextPart(text=active_task_snapshot),
-                    ],
+            final_messages = list(compaction_result.messages)
+            if compaction_result.usage is not None:
+                registration = register_compaction_archive(
+                    self._context.file_backend,
+                    rotated_path,
+                    message_count=original_message_count,
+                    summary=build_compaction_summary(compaction_result.messages),
                 )
-                await self._context.append_message(active_task_message)
-                estimated_token_count += estimate_text_tokens([active_task_message])
+                final_messages.append(
+                    internal_user_message(
+                        [
+                            system(
+                                "Compacted context archives are available via "
+                                "the RecallCompactedContext tool for this "
+                                "conversation trajectory. "
+                                f"Archive `{registration.record.id}` contains "
+                                "the pre-compaction history. "
+                                f"There are now "
+                                f"{registration.total_archives} compacted "
+                                "archive(s) available. Use targeted keywords "
+                                "if the compaction summary is not sufficient, "
+                                "and prefer this tool over reading raw archive "
+                                "files directly."
+                            )
+                        ]
+                    )
+                )
 
-        # Estimate token count so context_usage is not reported as 0%
-        await self._context.update_token_count(estimated_token_count)
+            self._sync_context_recall_tool_visibility()
 
-        wire_send(CompactionEnd())
+            try:
+                await self._checkpoint()
+                await self._context.append_message(final_messages)
+            except Exception:
+                logger.opt(exception=True).warning(
+                    "Failed to append compacted messages; restoring pre-compaction context"
+                )
+                try:
+                    rotated_path.replace(self._context.file_backend)
+                except Exception:
+                    logger.opt(exception=True).warning("Failed to restore rotated context file")
+                raise
+
+            estimated_token_count = CompactionResult(
+                messages=final_messages, usage=compaction_result.usage
+            ).estimated_token_count
+
+            if self._runtime.role == "root":
+                active_task_snapshot = build_active_task_snapshot(self._runtime.background_tasks)
+                if active_task_snapshot is not None:
+                    active_task_message = Message(
+                        role="user",
+                        content=[
+                            system(
+                                "The following background tasks are still active "
+                                "after compaction. Use TaskList if you need to "
+                                "re-enumerate them later."
+                            ),
+                            TextPart(text=active_task_snapshot),
+                        ],
+                    )
+                    await self._context.append_message(active_task_message)
+                    estimated_token_count += estimate_text_tokens([active_task_message])
+
+            # Estimate token count so context_usage is not reported as 0%
+            await self._context.update_token_count(estimated_token_count)
+
+            # Send StatusUpdate so the UI reflects the reduced context
+            snap = self.status
+            wire_send(
+                StatusUpdate(
+                    context_usage=snap.context_usage,
+                    context_tokens=snap.context_tokens,
+                    max_context_tokens=snap.max_context_tokens,
+                )
+            )
+        finally:
+            wire_send(CompactionEnd())
 
         _hook_task = asyncio.create_task(
             self._hook_engine.trigger(
