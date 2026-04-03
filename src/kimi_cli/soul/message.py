@@ -15,9 +15,19 @@ from kimi_cli.wire.types import (
     VideoURLPart,
 )
 
+INTERNAL_USER_NAME = "_kimi_internal"
+
 
 def system(message: str) -> ContentPart:
     return TextPart(text=f"<system>{message}</system>")
+
+
+def internal_user_message(
+    content: list[ContentPart] | ContentPart | str,
+    *,
+    name: str = INTERNAL_USER_NAME,
+) -> Message:
+    return Message(role="user", name=name, content=content)
 
 
 def system_reminder(message: str) -> TextPart:

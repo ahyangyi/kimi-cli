@@ -223,6 +223,7 @@ async def _drain_ui_messages(wire: Wire) -> None:
 
 @pytest.mark.asyncio
 async def test_step_retry_recovers_retryable_provider(runtime: Runtime, tmp_path: Path) -> None:
+    runtime.config.loop_control.turn_end_question_detection = False
     runtime.config.loop_control.max_retries_per_step = 2
     provider = RecoveringSequenceProvider()
     llm = LLM(
@@ -243,6 +244,7 @@ async def test_step_retry_recovers_retryable_provider(runtime: Runtime, tmp_path
 async def test_step_connection_error_recovery_only_retries_once(
     runtime: Runtime, tmp_path: Path
 ) -> None:
+    runtime.config.loop_control.turn_end_question_detection = False
     runtime.config.loop_control.max_retries_per_step = 5
     provider = AlwaysConnectionErrorProvider()
     llm = LLM(
@@ -264,6 +266,7 @@ async def test_step_connection_error_recovery_only_retries_once(
 async def test_step_status_error_still_uses_tenacity_retries(
     runtime: Runtime, tmp_path: Path, status_code: int
 ) -> None:
+    runtime.config.loop_control.turn_end_question_detection = False
     runtime.config.loop_control.max_retries_per_step = 3
     provider = StatusErrorThenSuccessProvider(status_code=status_code)
     llm = LLM(
@@ -284,6 +287,7 @@ async def test_step_status_error_still_uses_tenacity_retries(
 async def test_step_non_retryable_provider_keeps_tenacity_connection_retries(
     runtime: Runtime, tmp_path: Path
 ) -> None:
+    runtime.config.loop_control.turn_end_question_detection = False
     runtime.config.loop_control.max_retries_per_step = 2
     provider = NonRetryableConnectionProvider()
     llm = LLM(

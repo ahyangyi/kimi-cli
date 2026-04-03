@@ -52,6 +52,7 @@ from kimi_cli.wire.types import (
     CompactionBegin,
     CompactionEnd,
     ContentPart,
+    FollowUpInput,
     MCPLoadingBegin,
     MCPLoadingEnd,
     Notification,
@@ -470,6 +471,8 @@ class _LiveView:
                 self.request_approval(msg)
             case QuestionRequest():
                 self.request_question(msg)
+            case FollowUpInput():
+                pass  # Answer already shown via question panel
             case ToolCallRequest():
                 logger.warning("Unexpected ToolCallRequest in shell UI: {msg}", msg=msg)
             case _:
