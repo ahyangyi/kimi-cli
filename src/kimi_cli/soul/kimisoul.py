@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from functools import partial
+from itertools import chain
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
+from uuid import uuid4
 
 import kosong
 import tenacity
@@ -44,6 +48,7 @@ from kimi_cli.soul import (
     MaxStepsReached,
     Soul,
     StatusSnapshot,
+    get_wire_or_none,
     wire_send,
 )
 from kimi_cli.soul.agent import Agent, Runtime
@@ -68,13 +73,19 @@ from kimi_cli.tools.dmail import NAME as SendDMail_NAME
 from kimi_cli.tools.utils import ToolRejectedError
 from kimi_cli.utils.logging import logger
 from kimi_cli.utils.slashcmd import SlashCommand, parse_slash_command_call
+from kimi_cli.utils.turns import is_real_user_turn_start_message
 from kimi_cli.wire.file import WireFile
 from kimi_cli.wire.types import (
     CompactionBegin,
     CompactionEnd,
     ContentPart,
+    FollowUpInput,
     MCPLoadingBegin,
     MCPLoadingEnd,
+    QuestionItem,
+    QuestionNotSupported,
+    QuestionOption,
+    QuestionRequest,
     StatusUpdate,
     SteerInput,
     StepBegin,
@@ -95,6 +106,10 @@ SKILL_COMMAND_PREFIX = "skill:"
 FLOW_COMMAND_PREFIX = "flow:"
 DEFAULT_MAX_FLOW_MOVES = 1000
 
+TURN_END_QUESTION_DETECTOR_PROMPT = (
+    Path(__file__).resolve().parent.parent / "prompts" / "turn_end_question_detector.md"
+).read_text()
+
 
 type StepStopReason = Literal["no_tool_calls", "tool_rejected"]
 
@@ -113,6 +128,24 @@ class TurnOutcome:
     stop_reason: TurnStopReason
     final_message: Message | None
     step_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class TurnEndQuestionOption:
+    label: str
+    description: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class TurnEndQuestionItem:
+    question: str
+    options: tuple[TurnEndQuestionOption, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class TurnEndQuestionDetection:
+    has_question: bool
+    questions: tuple[TurnEndQuestionItem, ...]
 
 
 class KimiSoul:
@@ -522,7 +555,15 @@ class KimiSoul:
                 )
                 await runner.run(self, "")
             else:
-                await self._turn(user_message)
+                outcome = await self._turn(user_message)
+
+                # Turn-end question detection: if enabled and the turn produced a
+                # final message, check whether it asks the user to pick between options.
+                if outcome is not None and self._loop_control.turn_end_question_detection:  # type: ignore[reportUnnecessaryComparison]
+                    answer = await self._maybe_ask_turn_end_question(outcome)
+                    if answer:
+                        wire_send(FollowUpInput(text=answer))
+                        await self._turn(Message(role="user", content=answer))
 
             # --- Stop hook (max 1 re-trigger to prevent infinite loop) ---
             if not self._stop_hook_active:
@@ -1147,6 +1188,427 @@ class KimiSoul:
             if retry_state.next_action is not None
             else "unknown",
         )
+
+    @staticmethod
+    def _extract_json_payload(text: str) -> str:
+        payload = text.strip()
+        if payload.startswith("```"):
+            lines = payload.splitlines()
+            if len(lines) >= 3 and lines[-1].strip().startswith("```"):
+                payload = "\n".join(lines[1:-1]).strip()
+        start = payload.find("{")
+        end = payload.rfind("}")
+        if start >= 0 and end > start:
+            return payload[start : end + 1]
+        return payload
+
+    # -- Turn-end question detection ---------------------------------------------------
+
+    _TURN_END_DETECT_MAX_ATTEMPTS = 2
+    _TURN_END_DETECT_TIMEOUT = 15.0  # seconds
+    _TURN_END_DETECT_CONTEXT_TURNS = 3
+    _TURN_END_DETECT_CONTEXT_CHARS = 600
+    _TURN_END_DETECT_EXCERPT_CHARS = 600
+    _TURN_END_DETECT_LATEST_MESSAGE_CHARS = 2000
+
+    async def _detect_turn_end_question(
+        self,
+        assistant_message: Message,
+    ) -> TurnEndQuestionDetection | None:
+        """Use a side-channel LLM call to check if *assistant_message* asks the user
+        to choose between options.  Returns the parsed detection or ``None`` on
+        failure.  Retries up to ``_TURN_END_DETECT_MAX_ATTEMPTS`` when the LLM
+        returns unparseable output.  The entire detection is capped at
+        ``_TURN_END_DETECT_TIMEOUT`` seconds."""
+        try:
+            return await asyncio.wait_for(
+                self._detect_turn_end_question_inner(assistant_message),
+                timeout=self._TURN_END_DETECT_TIMEOUT,
+            )
+        except TimeoutError:
+            logger.warning(
+                "Turn-end question detection timed out after {timeout}s",
+                timeout=self._TURN_END_DETECT_TIMEOUT,
+            )
+            return self._heuristic_turn_end_question(assistant_message.extract_text(" "))
+
+    def _turn_end_question_excerpt(self, text: str) -> str:
+        units = [
+            unit.strip()
+            for unit in re.split(r"(?:\r?\n)+|(?<=[\u3002\uff01\uff1f!?])\s*", text)
+            if unit.strip()
+        ]
+        if not units:
+            return text.strip()
+        return "\n".join(units[-3:])
+
+    def _clip_turn_end_detector_text(self, text: str, *, max_chars: int) -> str:
+        text = text.strip()
+        if len(text) <= max_chars:
+            return text
+        if max_chars <= 3:
+            return text[:max_chars]
+        separator = "\n...\n"
+        keep = max(1, (max_chars - len(separator)) // 2)
+        return f"{text[:keep].rstrip()}{separator}{text[-keep:].lstrip()}"
+
+    def _recent_turn_end_detection_context(
+        self,
+        assistant_message: Message,
+        *,
+        max_turns: int,
+    ) -> list[tuple[str, str]]:
+        history = self._context.history
+        messages = reversed(history)
+        if not history or history[-1] != assistant_message:
+            messages = chain((assistant_message,), messages)
+
+        turns_reversed: list[tuple[str, str]] = []
+        current_assistant: str | None = None
+
+        for msg in messages:
+            if msg.role == "assistant" and current_assistant is None:
+                current_assistant = msg.extract_text(sep="\n").strip()
+
+            if not is_real_user_turn_start_message(msg):
+                continue
+
+            turns_reversed.append((msg.extract_text(sep="\n").strip(), current_assistant or ""))
+            current_assistant = None
+            if len(turns_reversed) >= max_turns:
+                break
+
+        turns_reversed.reverse()
+        return turns_reversed
+
+    def _build_turn_end_detector_prompt_input(self, assistant_message: Message) -> str:
+        text_only = assistant_message.extract_text(" ").strip()
+        excerpt = self._clip_turn_end_detector_text(
+            self._turn_end_question_excerpt(text_only),
+            max_chars=self._TURN_END_DETECT_EXCERPT_CHARS,
+        )
+        latest_message = self._clip_turn_end_detector_text(
+            text_only,
+            max_chars=self._TURN_END_DETECT_LATEST_MESSAGE_CHARS,
+        )
+        recent_turns = self._recent_turn_end_detection_context(
+            assistant_message,
+            max_turns=self._TURN_END_DETECT_CONTEXT_TURNS,
+        )
+        if recent_turns and recent_turns[-1][1] == text_only and text_only:
+            recent_turns = [
+                *recent_turns[:-1],
+                (recent_turns[-1][0], "(latest message shown below)"),
+            ]
+
+        lines = [
+            (
+                "Analyze whether the latest assistant message asks the user to choose "
+                "between options or make a decision."
+            ),
+            (
+                "Use recent turns only as supporting context. Base has_question on "
+                "the latest assistant message, not on older turns."
+            ),
+        ]
+        if recent_turns:
+            lines.extend(
+                [
+                    "",
+                    f"Recent turns (last {len(recent_turns)}, oldest to newest):",
+                ]
+            )
+            for idx, (user_text, assistant_text) in enumerate(recent_turns, start=1):
+                clipped_user = self._clip_turn_end_detector_text(
+                    user_text,
+                    max_chars=self._TURN_END_DETECT_CONTEXT_CHARS,
+                )
+                clipped_assistant = self._clip_turn_end_detector_text(
+                    assistant_text,
+                    max_chars=self._TURN_END_DETECT_CONTEXT_CHARS,
+                )
+                lines.extend(
+                    [
+                        "",
+                        f"[Turn {idx}]",
+                        f"User:\n{clipped_user or '(empty)'}",
+                        f"Assistant:\n{clipped_assistant or '(no textual reply)'}",
+                    ]
+                )
+
+        lines.extend(
+            [
+                "",
+                (
+                    "Focus on the ending of the latest assistant message, but use "
+                    "the full latest message if earlier lines contain the options."
+                ),
+                "",
+                "Latest message ending excerpt:",
+                excerpt,
+                "",
+                "Latest full assistant message (trimmed if needed):",
+                latest_message,
+            ]
+        )
+        return "\n".join(lines)
+
+    def _heuristic_turn_end_question(
+        self,
+        assistant_text: str,
+    ) -> TurnEndQuestionDetection | None:
+        excerpt = self._turn_end_question_excerpt(assistant_text)
+        units = [
+            unit.strip().strip('\u201c\u201d\u201e\u201f""\'`')  # noqa: B005
+            for unit in re.split(r"(?:\r?\n)+|(?<=[\u3002\uff01\uff1f!?])\s*", excerpt)
+            if unit.strip()
+        ]
+        if not units:
+            return None
+
+        soft_prefixes = (
+            "如果你要",
+            "如果你想",
+            "如果你愿意",
+            "如果你希望",
+            "如果继续",
+            "如果要继续",
+        )
+        leading_wrappers = '>》」』】）)]-•·*\u201c\u201d\u201e\u201f""\'`('
+        conditional_offer_tokens = ("我可以", "我现在就", "我现在可以", "我现在就可以")
+        direct_offer_tokens = conditional_offer_tokens + ("我就",)
+        action_tokens = (
+            "继续",
+            "开始",
+            "按这个方案",
+            "修改",
+            "处理",
+            "推进",
+            "做下去",
+            "改下去",
+            "做下一轮",
+            "做下一步",
+        )
+
+        for unit in reversed(units):
+            normalized = re.sub(r"\s+", "", unit)
+            if not normalized:
+                continue
+
+            candidate = normalized.lstrip(leading_wrappers)
+            prefix = next((token for token in soft_prefixes if candidate.startswith(token)), None)
+            if prefix is None:
+                continue
+            if candidate.startswith(
+                ("如果继续这样做", "如果继续这么做", "如果要继续这样做", "如果要继续这么做")
+            ):
+                continue
+
+            offer_tokens = (
+                direct_offer_tokens
+                if prefix in {"如果你要", "如果你想", "如果你愿意", "如果你希望"}
+                else conditional_offer_tokens
+            )
+            if not any(token in candidate for token in offer_tokens):
+                continue
+            if not any(token in candidate for token in action_tokens):
+                continue
+
+            continue_like = any(
+                token in candidate for token in ("继续", "做下去", "改下去", "做下一轮", "做下一步")
+            )
+            if continue_like:
+                question = "要我继续吗？"
+                options = (
+                    TurnEndQuestionOption(label="继续", description="继续按当前方案往下做"),
+                    TurnEndQuestionOption(label="先别", description="先不要继续"),
+                )
+            else:
+                question = "要我现在开始吗？"
+                options = (
+                    TurnEndQuestionOption(label="开始", description="现在开始处理"),
+                    TurnEndQuestionOption(label="先别", description="先不要开始"),
+                )
+            return TurnEndQuestionDetection(
+                has_question=True,
+                questions=(TurnEndQuestionItem(question=question, options=options),),
+            )
+        return None
+
+    async def _detect_turn_end_question_inner(
+        self,
+        assistant_message: Message,
+    ) -> TurnEndQuestionDetection | None:
+        """Inner implementation without timeout wrapper."""
+        assert self._runtime.llm is not None
+        chat_provider = self._runtime.llm.chat_provider.with_thinking("off")
+
+        text_only = assistant_message.extract_text(" ").strip()
+        if not text_only:
+            return None
+        heuristic_detection = self._heuristic_turn_end_question(text_only)
+        history: list[Message] = [
+            Message(
+                role="user",
+                content=self._build_turn_end_detector_prompt_input(assistant_message),
+            )
+        ]
+
+        for attempt in range(1, self._TURN_END_DETECT_MAX_ATTEMPTS + 1):
+
+            async def _run_once():
+                return await kosong.generate(
+                    chat_provider=chat_provider,
+                    system_prompt=TURN_END_QUESTION_DETECTOR_PROMPT,
+                    tools=[],
+                    history=history,
+                )
+
+            try:
+                result = await self._run_with_connection_recovery(
+                    "turn-end question detection",
+                    _run_once,
+                    chat_provider=chat_provider,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("Turn-end question detection failed: {error}", error=exc)
+                return heuristic_detection
+
+            raw_text = result.message.extract_text(" ")
+            detection = self._parse_turn_end_question_payload(raw_text)
+            if detection is not None:
+                return detection
+
+            if attempt < self._TURN_END_DETECT_MAX_ATTEMPTS:
+                logger.debug(
+                    "Turn-end question detection returned unparseable output "
+                    "(attempt {attempt}), retrying",
+                    attempt=attempt,
+                )
+            else:
+                logger.warning(
+                    "Turn-end question detection returned unparseable output "
+                    "after {attempts} attempts; giving up",
+                    attempts=self._TURN_END_DETECT_MAX_ATTEMPTS,
+                )
+
+        return heuristic_detection
+
+    def _parse_turn_end_question_payload(self, text: str) -> TurnEndQuestionDetection | None:
+        payload_text = self._extract_json_payload(text)
+        try:
+            payload_obj: object = json.loads(payload_text)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(payload_obj, dict):
+            return None
+        payload = cast(dict[str, object], payload_obj)
+
+        has_question = payload.get("has_question", False)
+        if not isinstance(has_question, bool):
+            return None
+        if not has_question:
+            return TurnEndQuestionDetection(has_question=False, questions=())
+
+        raw_questions = payload.get("questions", [])
+        if not isinstance(raw_questions, list):
+            return None
+
+        questions: list[TurnEndQuestionItem] = []
+        for raw_q in cast(list[object], raw_questions)[:4]:
+            if not isinstance(raw_q, dict):
+                continue
+            q = cast(dict[str, object], raw_q)
+            question_text = q.get("question")
+            if not isinstance(question_text, str) or not question_text.strip():
+                continue
+            raw_options = q.get("options", [])
+            if not isinstance(raw_options, list):
+                continue
+            options: list[TurnEndQuestionOption] = []
+            for raw_opt in cast(list[object], raw_options)[:4]:
+                if not isinstance(raw_opt, dict):
+                    continue
+                opt = cast(dict[str, object], raw_opt)
+                label = opt.get("label")
+                if not isinstance(label, str) or not label.strip():
+                    continue
+                desc = opt.get("description", "")
+                desc = desc.strip() if isinstance(desc, str) else ""
+                options.append(TurnEndQuestionOption(label=label.strip(), description=desc))
+            if len(options) >= 2:
+                questions.append(
+                    TurnEndQuestionItem(
+                        question=question_text.strip(),
+                        options=tuple(options),
+                    )
+                )
+        if not questions:
+            return TurnEndQuestionDetection(has_question=False, questions=())
+        return TurnEndQuestionDetection(has_question=True, questions=tuple(questions))
+
+    async def _maybe_ask_turn_end_question(
+        self,
+        outcome: TurnOutcome,
+    ) -> str | None:
+        """Detect choice questions in the turn's final message and present them
+        to the user via a structured ``QuestionRequest``.
+
+        Returns the user's answer text to be used as the next turn prompt,
+        or ``None`` if no question was detected / the user dismissed it.
+        """
+        if outcome.stop_reason != "no_tool_calls" or outcome.final_message is None:
+            return None
+
+        detection = await self._detect_turn_end_question(outcome.final_message)
+        if detection is None or not detection.has_question:
+            return None
+
+        wire = get_wire_or_none()
+        if wire is None:
+            return None
+
+        assistant_reply_body = outcome.final_message.extract_text(sep="\n").strip()
+
+        questions = [
+            QuestionItem(
+                question=q.question,
+                options=[
+                    QuestionOption(label=o.label, description=o.description) for o in q.options
+                ],
+                body=assistant_reply_body,
+            )
+            for q in detection.questions
+        ]
+
+        request = QuestionRequest(
+            id=str(uuid4()),
+            tool_call_id=f"turn-end-{uuid4().hex[:8]}",
+            questions=questions,
+        )
+
+        wire_send(request)
+
+        try:
+            answers = await request.wait()
+        except QuestionNotSupported:
+            logger.debug("Client does not support interactive questions; skipping")
+            return None
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Failed to get user response for turn-end question")
+            return None
+
+        if not answers:
+            return None
+
+        parts: list[str] = []
+        for _question_text, answer_text in answers.items():
+            parts.append(f"{answer_text}")
+        return "\n".join(parts) if parts else None
 
 
 class BackToTheFuture(Exception):
