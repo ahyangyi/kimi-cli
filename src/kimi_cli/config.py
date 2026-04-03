@@ -87,6 +87,8 @@ class LoopControl(BaseModel):
     """Context usage ratio threshold for auto-compaction. Default is 0.85 (85%).
     Auto-compaction triggers when context_tokens >= max_context_size * compaction_trigger_ratio
     or when context_tokens + reserved_context_size >= max_context_size."""
+    turn_end_question_detection: bool = Field(default=True)
+    """Detect choice/decision questions at turn end and prompt user interactively."""
 
 
 class BackgroundConfig(BaseModel):

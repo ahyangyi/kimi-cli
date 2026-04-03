@@ -53,6 +53,14 @@ class SteerInput(BaseModel):
     user_input: str | list[ContentPart]
 
 
+class FollowUpInput(BaseModel):
+    """Announce a synthesized follow-up user input (e.g. from turn-end question
+    selection) so clients can decide whether and how to surface what was sent
+    on the user's behalf."""
+
+    text: str
+
+
 class TurnEnd(BaseModel):
     """
     Indicates the end of the current agent turn.
@@ -479,6 +487,7 @@ class ToolCallRequest(BaseModel):
 type Event = (
     TurnBegin
     | SteerInput
+    | FollowUpInput
     | TurnEnd
     | StepBegin
     | StepInterrupted
@@ -625,6 +634,7 @@ __all__ = [
     # `WireMessage` variants
     "TurnBegin",
     "SteerInput",
+    "FollowUpInput",
     "TurnEnd",
     "StepBegin",
     "StepInterrupted",
