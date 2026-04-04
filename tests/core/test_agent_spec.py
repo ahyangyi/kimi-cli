@@ -38,7 +38,7 @@ def test_load_default_agent_spec():
             "kimi_cli.tools.file:Glob",
             "kimi_cli.tools.file:Grep",
             "kimi_cli.tools.file:WriteFile",
-            "kimi_cli.tools.file:StrReplaceFile",
+            "kimi_cli.tools.file:Edit",
             "kimi_cli.tools.web:SearchWeb",
             "kimi_cli.tools.web:FetchURL",
             "kimi_cli.tools.plan:ExitPlanMode",
@@ -81,7 +81,7 @@ def test_load_default_agent_spec():
             "kimi_cli.tools.file:Glob",
             "kimi_cli.tools.file:Grep",
             "kimi_cli.tools.file:WriteFile",
-            "kimi_cli.tools.file:StrReplaceFile",
+            "kimi_cli.tools.file:Edit",
             "kimi_cli.tools.web:SearchWeb",
             "kimi_cli.tools.web:FetchURL",
         ]
@@ -109,7 +109,7 @@ def test_load_default_agent_spec():
             "kimi_cli.tools.file:Glob",
             "kimi_cli.tools.file:Grep",
             "kimi_cli.tools.file:WriteFile",
-            "kimi_cli.tools.file:StrReplaceFile",
+            "kimi_cli.tools.file:Edit",
             "kimi_cli.tools.web:SearchWeb",
             "kimi_cli.tools.web:FetchURL",
             "kimi_cli.tools.plan:ExitPlanMode",
@@ -175,7 +175,7 @@ You are meant to be a fast agent. Complete the search request efficiently and re
             "kimi_cli.tools.plan:ExitPlanMode",
             "kimi_cli.tools.plan.enter:EnterPlanMode",
             "kimi_cli.tools.file:WriteFile",
-            "kimi_cli.tools.file:StrReplaceFile",
+            "kimi_cli.tools.file:Edit",
         ]
     )
     assert subagent_specs["explore"].tools == snapshot(
@@ -192,7 +192,7 @@ You are meant to be a fast agent. Complete the search request efficiently and re
             "kimi_cli.tools.file:Glob",
             "kimi_cli.tools.file:Grep",
             "kimi_cli.tools.file:WriteFile",
-            "kimi_cli.tools.file:StrReplaceFile",
+            "kimi_cli.tools.file:Edit",
             "kimi_cli.tools.web:SearchWeb",
             "kimi_cli.tools.web:FetchURL",
             "kimi_cli.tools.plan:ExitPlanMode",
@@ -242,7 +242,7 @@ Before designing your implementation plan, consider whether you fully understand
             "kimi_cli.tools.plan.enter:EnterPlanMode",
             "kimi_cli.tools.shell:Shell",
             "kimi_cli.tools.file:WriteFile",
-            "kimi_cli.tools.file:StrReplaceFile",
+            "kimi_cli.tools.file:Edit",
         ]
     )
     assert subagent_specs["plan"].tools == snapshot(
@@ -259,7 +259,7 @@ Before designing your implementation plan, consider whether you fully understand
             "kimi_cli.tools.file:Glob",
             "kimi_cli.tools.file:Grep",
             "kimi_cli.tools.file:WriteFile",
-            "kimi_cli.tools.file:StrReplaceFile",
+            "kimi_cli.tools.file:Edit",
             "kimi_cli.tools.web:SearchWeb",
             "kimi_cli.tools.web:FetchURL",
             "kimi_cli.tools.plan:ExitPlanMode",
@@ -355,7 +355,7 @@ agent:
                 "kimi_cli.tools.file:Glob",
                 "kimi_cli.tools.file:Grep",
                 "kimi_cli.tools.file:WriteFile",
-                "kimi_cli.tools.file:StrReplaceFile",
+                "kimi_cli.tools.file:Edit",
                 "kimi_cli.tools.web:SearchWeb",
                 "kimi_cli.tools.web:FetchURL",
                 "kimi_cli.tools.plan:ExitPlanMode",

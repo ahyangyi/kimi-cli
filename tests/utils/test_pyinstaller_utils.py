@@ -107,7 +107,7 @@ def test_pyinstaller_datas():
             "kimi_cli/tools/file",
         ),
         (
-            "src/kimi_cli/tools/file/replace.md",
+            "src/kimi_cli/tools/file/edit.md",
             "kimi_cli/tools/file",
         ),
         (
