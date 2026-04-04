@@ -5,8 +5,6 @@ import streamingjson  # type: ignore[reportMissingTypeStubs]
 from kaos.path import KaosPath
 from kosong.utils.typing import JsonType
 
-from kimi_cli.utils.string import shorten_middle
-
 
 class SkipThisTool(Exception):
     """Raised when a tool decides to skip itself from the loading process."""
@@ -75,7 +73,7 @@ def extract_key_argument(json_content: str | streamingjson.Lexer, tool_name: str
             if not isinstance(curr_args, dict) or not curr_args.get("path"):
                 return None
             key_argument = _normalize_path(str(curr_args["path"]))
-        case "StrReplaceFile":
+        case "Edit":
             if not isinstance(curr_args, dict) or not curr_args.get("path"):
                 return None
             key_argument = _normalize_path(str(curr_args["path"]))
@@ -94,7 +92,6 @@ def extract_key_argument(json_content: str | streamingjson.Lexer, tool_name: str
                 key_argument = "".join(content)
             else:
                 key_argument = json_content
-    key_argument = shorten_middle(key_argument, width=50)
     return key_argument
 
 

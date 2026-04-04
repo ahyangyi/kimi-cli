@@ -15,7 +15,7 @@ from kimi_cli.soul.approval import Approval
 from kimi_cli.soul.context import Context
 from kimi_cli.soul.kimisoul import KimiSoul
 from kimi_cli.soul.toolset import KimiToolset
-from kimi_cli.tools.file.replace import StrReplaceFile
+from kimi_cli.tools.file.replace import EditTool
 from kimi_cli.tools.file.write import WriteFile
 from kimi_cli.tools.plan import ExitPlanMode, Params, PlanOption
 from kimi_cli.tools.plan.enter import _DESCRIPTION, EnterPlanMode
@@ -443,7 +443,7 @@ class TestEnterPlanModeHappyPaths:
         output = _tool_output_text(result)
         assert "Plan mode activated" in output or "plan mode" in output.lower()
         assert str(plan_path) in output
-        assert "StrReplaceFile" in output
+        assert "Edit" in output
         assert "clarify missing requirements" in output
         toggle_cb.assert_awaited_once()
 
@@ -602,7 +602,7 @@ class TestKimiSoulPlanState:
     def test_bind_plan_mode_tools_binds_callbacks(self, runtime: Runtime, tmp_path: Path) -> None:
         toolset = KimiToolset()
         write_tool = WriteFile(runtime, runtime.approval)
-        replace_tool = StrReplaceFile(runtime, runtime.approval)
+        replace_tool = EditTool(runtime, runtime.approval)
         toolset.add(write_tool)
         toolset.add(replace_tool)
 

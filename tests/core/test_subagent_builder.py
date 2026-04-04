@@ -29,7 +29,7 @@ async def test_builder_builds_coder_with_write_tools(runtime):
     tool_names = [tool.name for tool in coder.toolset.tools]
     assert "Shell" in tool_names
     assert "WriteFile" in tool_names
-    assert "StrReplaceFile" in tool_names
+    assert "Edit" in tool_names
     assert "Agent" not in tool_names
     assert "AskUserQuestion" not in tool_names
     assert "SetTodoList" not in tool_names
@@ -56,7 +56,7 @@ async def test_builder_builds_explore_read_only_with_shell(runtime):
     assert "ReadFile" in tool_names
     assert "Grep" in tool_names
     assert "WriteFile" not in tool_names
-    assert "StrReplaceFile" not in tool_names
+    assert "Edit" not in tool_names
     assert "Agent" not in tool_names
 
 
@@ -82,7 +82,7 @@ async def test_builder_builds_plan_without_shell_or_write_tools(runtime):
     assert "SearchWeb" in tool_names
     assert "Shell" not in tool_names
     assert "WriteFile" not in tool_names
-    assert "StrReplaceFile" not in tool_names
+    assert "Edit" not in tool_names
     assert "Agent" not in tool_names
 
 

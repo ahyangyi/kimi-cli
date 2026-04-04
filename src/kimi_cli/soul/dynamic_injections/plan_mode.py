@@ -124,13 +124,13 @@ def _full_reminder(
         if plan_exists:
             lines.append(
                 f"Plan file: {plan_file_path} "
-                "(exists — read first, then update it with WriteFile or StrReplaceFile)"
+                "(exists — read first, then update it with WriteFile or Edit)"
             )
         else:
             lines.append(
                 f"Plan file: {plan_file_path} "
                 "(create it with WriteFile; once it exists, you can modify it with "
-                "WriteFile or StrReplaceFile)"
+                "WriteFile or Edit)"
             )
         lines.append("This is the only file you are allowed to edit.")
     # Workflow
@@ -142,7 +142,7 @@ def _full_reminder(
             "2. Design — converge on the best approach; "
             "consider trade-offs but aim for a single recommendation",
             "3. Review — re-read key files to verify understanding",
-            "4. Write Plan — modify the plan file with WriteFile or StrReplaceFile. "
+            "4. Write Plan — modify the plan file with WriteFile or Edit. "
             "Use WriteFile if the plan file does not exist yet",
             "5. Exit — call ExitPlanMode for user approval",
         ]
@@ -194,7 +194,7 @@ def _sparse_reminder(plan_file_path: str | None = None) -> str:
         parts.append("Read-only.")
     parts.extend(
         [
-            "Use WriteFile or StrReplaceFile to modify the plan file. "
+            "Use WriteFile or Edit to modify the plan file. "
             "If it does not exist yet, create it with WriteFile first.",
             "Use AskUserQuestion to clarify user preferences "
             "when it helps you write a better plan.",
@@ -226,7 +226,7 @@ def _reentry_reminder(plan_file_path: str | None = None) -> str:
         "2. Evaluate the user's current request against that plan",
         "3. If different task: replace the old plan with a fresh one. "
         "If same task: update the existing plan.",
-        "4. You may use WriteFile or StrReplaceFile to modify the plan file. "
+        "4. You may use WriteFile or Edit to modify the plan file. "
         "If the file does not exist yet, create it with WriteFile first.",
         "5. Use AskUserQuestion to clarify missing requirements "
         "or user preferences that affect the plan.",
