@@ -13,7 +13,7 @@ from kimi_cli.tools.file.glob import Glob
 from kimi_cli.tools.file.grep_local import Grep
 from kimi_cli.tools.file.read import ReadFile
 from kimi_cli.tools.file.read_media import ReadMediaFile
-from kimi_cli.tools.file.replace import StrReplaceFile
+from kimi_cli.tools.file.replace import EditTool
 from kimi_cli.tools.file.write import WriteFile
 from kimi_cli.tools.shell import Shell
 from kimi_cli.tools.think import Think
@@ -233,9 +233,11 @@ Read text content from a file.
 - This tool is a tool that you typically want to use in parallel. Always read multiple files in one response when possible.
 - This tool can only read text files. To read images or videos, use other appropriate tools. To list directories, use the Glob tool or `ls` command via the Shell tool. To read other file types, use appropriate commands via the Shell tool.
 - If the file doesn't exist or path is invalid, an error will be returned.
-- If you want to search for a certain content/pattern, prefer Grep tool over ReadFile.
+- If you want to search for a certain content/pattern, prefer Shell with `rg` (or the Grep tool if Shell is unavailable) over ReadFile.
 - Content will be returned with a line number before each line like `cat -n` format.
-- Use `line_offset` and `n_lines` parameters when you only need to read a part of the file.
+- Use `line_offset` and `n_lines` parameters when you only need to read a part of the file.- When context budget is tight, prefer reading ≤200 lines at a time with `line_offset` + `n_lines` rather than loading the whole file.
+- `line_offset` can be negative to count backward from the end of the file. For example, `line_offset=-200` reads the last 200 lines.
+- The tool result message includes the file's total line count when it is known.
 - The maximum number of lines that can be read at once is 1000.
 - Any lines longer than 2000 characters will be truncated, ending with "...".
 """
@@ -316,17 +318,20 @@ Write content to a file.
     )
 
 
-def test_str_replace_file_description(str_replace_file_tool: StrReplaceFile):
-    """Test the description of StrReplaceFile tool."""
-    assert str_replace_file_tool.base.description == snapshot(
+def test_edit_tool_description(edit_tool: EditTool):
+    """Test the description of EditTool."""
+    assert edit_tool.base.description == snapshot(
         """\
-Replace specific strings within a specified file.
+Edit a text file using structured edit operations.
 
 **Tips:**
 - Only use this tool on text files.
-- Multi-line strings are supported.
-- Can specify a single edit or a list of edits in one call.
-- You should prefer this tool over WriteFile tool and Shell `sed` command.
+- You can provide a single edit operation or a list of operations in one call.
+- Supported edit kinds are `replace`, `append`, `prepend`, `delete`, `insert_before`, `insert_after`, `replace_lines`, and `patch`.
+- Replace operations must use `kind: "replace"`.
+- `replace_lines` uses 1-based inclusive line numbers; negative values count backward from the end of the file.
+- `patch` accepts unified diff or hunk-only patch text and must apply cleanly to the current file.
+- You should prefer this tool over WriteFile tool and Shell `sed` command when you want focused edits instead of rewriting the whole file.
 """
     )
 

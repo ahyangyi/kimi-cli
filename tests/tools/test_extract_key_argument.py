@@ -36,12 +36,11 @@ class TestExtractKeyArgument:
         result = extract_key_argument('{"to": "x"}', "SendDMail")
         assert result is None
 
-    def test_long_content_truncated(self):
+    def test_long_content_not_truncated(self):
         long_url = "https://example.com/" + "a" * 200
         result = extract_key_argument(f'{{"url": "{long_url}"}}', "FetchURL")
         assert result is not None
-        # shorten_middle(text, width=50) -> text[:25] + "..." + text[-25:]  => length 53
-        assert len(result) <= 53
+        assert result == long_url
 
     def test_unknown_tool_returns_raw_content(self):
         result = extract_key_argument('{"a": 1}', "UnknownTool")

@@ -1,9 +1,10 @@
+from collections import deque
 from pathlib import Path
 from typing import override
 
 from kaos.path import KaosPath
 from kosong.tooling import CallableTool2, ToolError, ToolOk, ToolReturnValue
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from kimi_cli.soul.agent import Runtime
 from kimi_cli.tools.file.utils import MEDIA_SNIFF_BYTES, detect_file_type
@@ -26,11 +27,14 @@ class Params(BaseModel):
     line_offset: int = Field(
         description=(
             "The line number to start reading from. "
-            "By default read from the beginning of the file. "
-            "Set this when the file is too large to read at once."
+            "Positive values count from the beginning of the file. "
+            "Negative values count backward from the end of the file, where -1 is the last "
+            "line. By default read from the beginning of the file. "
+            "Set this when the file is too large to read at once or when you want to read the "
+            "tail of a file."
         ),
         default=1,
-        ge=1,
+        json_schema_extra={"not": {"const": 0}},
     )
     n_lines: int = Field(
         description=(
@@ -41,6 +45,13 @@ class Params(BaseModel):
         default=MAX_LINES,
         ge=1,
     )
+
+    @field_validator("line_offset")
+    @classmethod
+    def validate_line_offset(cls, value: int) -> int:
+        if value == 0:
+            raise ValueError("line_offset cannot be 0")
+        return value
 
 
 class ReadFile(CallableTool2[Params]):
@@ -69,7 +80,6 @@ class ReadFile(CallableTool2[Params]):
             not is_within_workspace(resolved_path, self._work_dir, self._additional_dirs)
             and not path.is_absolute()
         ):
-            # Outside files can only be read with absolute paths
             return ToolError(
                 message=(
                     f"`{path}` is not an absolute path. "
@@ -79,6 +89,57 @@ class ReadFile(CallableTool2[Params]):
                 brief="Invalid path",
             )
         return None
+
+    @staticmethod
+    def _build_message(
+        *,
+        lines_read: int,
+        effective_line_offset: int,
+        total_lines: int | None,
+        stop_reason: str | None,
+        truncated_line_numbers: list[int],
+    ) -> str:
+        if total_lines is None:
+            if lines_read > 0:
+                message = (
+                    f"{lines_read} lines read from file starting from line {effective_line_offset}."
+                )
+            else:
+                message = (
+                    f"No lines read from file starting from line {effective_line_offset}."
+                    if effective_line_offset != 1
+                    else "No lines read from file."
+                )
+        else:
+            message = (
+                f"{lines_read} lines read from file starting from line {effective_line_offset}. "
+                f"File has {total_lines} total lines."
+                if lines_read > 0
+                else (
+                    f"No lines read from file starting from line {effective_line_offset}. "
+                    f"File has {total_lines} total lines."
+                    if effective_line_offset != 1 or total_lines != 0
+                    else f"No lines read from file. File has {total_lines} total lines."
+                )
+            )
+
+        if stop_reason == "max_lines":
+            message += f" Max {MAX_LINES} lines reached."
+        elif stop_reason == "max_bytes":
+            message += f" Max {MAX_BYTES} bytes reached."
+        elif stop_reason == "eof":
+            message += " End of file reached."
+
+        if truncated_line_numbers:
+            message += f" Lines {truncated_line_numbers} were truncated."
+        return message
+
+    @staticmethod
+    def _format_lines(lines: list[str], *, start_line: int) -> str:
+        lines_with_no: list[str] = []
+        for line_num, line in zip(range(start_line, start_line + len(lines)), lines, strict=True):
+            lines_with_no.append(f"{line_num:6d}\t{line}")
+        return "".join(lines_with_no)
 
     @override
     async def __call__(self, params: Params) -> ToolReturnValue:
@@ -138,57 +199,93 @@ class ReadFile(CallableTool2[Params]):
                     brief="File not readable",
                 )
 
-            assert params.line_offset >= 1
-            assert params.n_lines >= 1
-
+            requested_line_limit = min(params.n_lines, MAX_LINES)
             lines: list[str] = []
-            n_bytes = 0
             truncated_line_numbers: list[int] = []
-            max_lines_reached = False
-            max_bytes_reached = False
-            current_line_no = 0
-            async for line in p.read_lines(errors="replace"):
-                current_line_no += 1
-                if current_line_no < params.line_offset:
-                    continue
-                truncated = truncate_line(line, MAX_LINE_LENGTH)
-                if truncated != line:
-                    truncated_line_numbers.append(current_line_no)
-                lines.append(truncated)
-                n_bytes += len(truncated.encode("utf-8"))
-                if len(lines) >= params.n_lines:
-                    break
-                if len(lines) >= MAX_LINES:
-                    max_lines_reached = True
-                    break
-                if n_bytes >= MAX_BYTES:
-                    max_bytes_reached = True
-                    break
+            total_lines: int | None = None
+            stop_reason: str | None = None
+            n_bytes = 0
 
-            # Format output with line numbers like `cat -n`
-            lines_with_no: list[str] = []
-            for line_num, line in zip(
-                range(params.line_offset, params.line_offset + len(lines)), lines, strict=True
-            ):
-                # Use 6-digit line number width, right-aligned, with tab separator
-                lines_with_no.append(f"{line_num:6d}\t{line}")
+            if params.line_offset > 0:
+                effective_line_offset = params.line_offset
+                current_line_no = 0
+                line_iter = p.read_lines(errors="replace").__aiter__()
 
-            message = (
-                f"{len(lines)} lines read from file starting from line {params.line_offset}."
-                if len(lines) > 0
-                else "No lines read from file."
-            )
-            if max_lines_reached:
-                message += f" Max {MAX_LINES} lines reached."
-            elif max_bytes_reached:
-                message += f" Max {MAX_BYTES} bytes reached."
-            elif len(lines) < params.n_lines:
-                message += " End of file reached."
-            if truncated_line_numbers:
-                message += f" Lines {truncated_line_numbers} were truncated."
+                while True:
+                    try:
+                        line = await anext(line_iter)
+                    except StopAsyncIteration:
+                        total_lines = current_line_no
+                        stop_reason = "eof"
+                        break
+
+                    current_line_no += 1
+                    if current_line_no < effective_line_offset:
+                        continue
+
+                    truncated = truncate_line(line, MAX_LINE_LENGTH)
+                    if truncated != line:
+                        truncated_line_numbers.append(current_line_no)
+                    lines.append(truncated)
+                    n_bytes += len(truncated.encode("utf-8"))
+
+                    if len(lines) >= requested_line_limit:
+                        try:
+                            await anext(line_iter)
+                        except StopAsyncIteration:
+                            total_lines = current_line_no
+                            stop_reason = "eof"
+                        else:
+                            if params.n_lines > MAX_LINES:
+                                stop_reason = "max_lines"
+                        break
+
+                    if n_bytes >= MAX_BYTES:
+                        stop_reason = "max_bytes"
+                        break
+            else:
+                effective_line_offset = 1
+                total_lines = 0
+                tail_lines: deque[tuple[int, str]] = deque(maxlen=max(1, -params.line_offset))
+
+                async for line in p.read_lines(errors="replace"):
+                    total_lines += 1
+                    tail_lines.append((total_lines, line))
+
+                effective_line_offset = max(1, total_lines + params.line_offset + 1)
+                available_from_offset = max(0, total_lines - effective_line_offset + 1)
+
+                for current_line_no, line in tail_lines:
+                    if current_line_no < effective_line_offset:
+                        continue
+
+                    truncated = truncate_line(line, MAX_LINE_LENGTH)
+                    if truncated != line:
+                        truncated_line_numbers.append(current_line_no)
+                    lines.append(truncated)
+                    n_bytes += len(truncated.encode("utf-8"))
+
+                    if len(lines) >= requested_line_limit:
+                        if params.n_lines > MAX_LINES and available_from_offset > MAX_LINES:
+                            stop_reason = "max_lines"
+                        break
+
+                    if n_bytes >= MAX_BYTES:
+                        stop_reason = "max_bytes"
+                        break
+
+                if stop_reason is None and available_from_offset <= len(lines):
+                    stop_reason = "eof"
+
             return ToolOk(
-                output="".join(lines_with_no),  # lines already contain \n, just join them
-                message=message,
+                output=self._format_lines(lines, start_line=effective_line_offset),
+                message=self._build_message(
+                    lines_read=len(lines),
+                    effective_line_offset=effective_line_offset,
+                    total_lines=total_lines,
+                    stop_reason=stop_reason,
+                    truncated_line_numbers=truncated_line_numbers,
+                ),
             )
         except Exception as e:
             return ToolError(

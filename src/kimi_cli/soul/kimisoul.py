@@ -241,11 +241,11 @@ class KimiSoul:
         if isinstance(write_tool, WriteFile):
             write_tool.bind_plan_mode(checker, path_getter)
 
-        from kimi_cli.tools.file.replace import StrReplaceFile
+        from kimi_cli.tools.file.replace import EditTool
 
-        replace_tool = self._agent.toolset.find("StrReplaceFile")
-        if isinstance(replace_tool, StrReplaceFile):
-            replace_tool.bind_plan_mode(checker, path_getter)
+        edit_tool = self._agent.toolset.find("Edit")
+        if isinstance(edit_tool, EditTool):
+            edit_tool.bind_plan_mode(checker, path_getter)
 
         # ExitPlanMode has a special bind() method
         from kimi_cli.tools.plan import ExitPlanMode
