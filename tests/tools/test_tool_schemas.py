@@ -5,7 +5,7 @@ from __future__ import annotations
 from inline_snapshot import snapshot
 
 from kimi_cli.tools.agent import Agent as AgentTool
-from kimi_cli.tools.background import TaskList, TaskOutput, TaskStop
+from kimi_cli.tools.background import TaskList, TaskOutput, TaskStop, TaskWrite
 from kimi_cli.tools.dmail import SendDMail
 from kimi_cli.tools.file.glob import Glob
 from kimi_cli.tools.file.grep_local import Grep
@@ -165,6 +165,11 @@ def test_shell_params_schema(shell_tool: Shell):
                     "description": "A short description for the background task. Required when run_in_background=true.",
                     "type": "string",
                 },
+                "interactive": {
+                    "default": False,
+                    "description": "Start an interactive background task whose stdin stays open for later TaskWrite calls. Requires run_in_background=true.",
+                    "type": "boolean",
+                },
             },
             "required": ["command"],
             "type": "object",
@@ -181,7 +186,7 @@ def test_task_output_params_schema(task_output_tool: TaskOutput):
                     "type": "string",
                 },
                 "block": {
-                    "default": False,
+                    "default": True,
                     "description": "Whether to wait for the task to finish before returning.",
                     "type": "boolean",
                 },
@@ -191,6 +196,11 @@ def test_task_output_params_schema(task_output_tool: TaskOutput):
                     "maximum": 3600,
                     "minimum": 0,
                     "type": "integer",
+                },
+                "offset": {
+                    "anyOf": [{"minimum": 0, "type": "integer"}, {"type": "null"}],
+                    "default": None,
+                    "description": "Line offset (0-based) to start reading output from. If not set, reads the last lines that fit within ~32 KiB (tail). Set to 0 to read from the beginning.",
                 },
             },
             "required": ["task_id"],
@@ -236,6 +246,31 @@ def test_task_stop_params_schema(task_stop_tool: TaskStop):
                 },
             },
             "required": ["task_id"],
+            "type": "object",
+        }
+    )
+
+
+def test_task_write_params_schema(task_write_tool: TaskWrite):
+    assert task_write_tool.base.parameters == snapshot(
+        {
+            "properties": {
+                "task_id": {
+                    "description": "The background task ID to write to.",
+                    "type": "string",
+                },
+                "input": {
+                    "description": "The text to write to the task's stdin.",
+                    "maxLength": 1048576,
+                    "type": "string",
+                },
+                "append_newline": {
+                    "default": True,
+                    "description": "Whether to append a newline after the input.",
+                    "type": "boolean",
+                },
+            },
+            "required": ["task_id", "input"],
             "type": "object",
         }
     )

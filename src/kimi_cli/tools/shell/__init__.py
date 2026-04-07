@@ -43,6 +43,13 @@ class Params(BaseModel):
             "A short description for the background task. Required when run_in_background=true."
         ),
     )
+    interactive: bool = Field(
+        default=False,
+        description=(
+            "Start an interactive background task whose stdin stays open for later "
+            "TaskWrite calls. Requires run_in_background=true."
+        ),
+    )
 
     @model_validator(mode="after")
     def _validate_background_fields(self) -> Self:
@@ -53,6 +60,8 @@ class Params(BaseModel):
                 f"timeout must be <= {MAX_FOREGROUND_TIMEOUT}s for foreground commands; "
                 f"use run_in_background=true for longer timeouts (up to {MAX_BACKGROUND_TIMEOUT}s)"
             )
+        if self.interactive and not self.run_in_background:
+            raise ValueError("interactive=true requires run_in_background=true")
         return self
 
 
@@ -164,6 +173,7 @@ class Shell(CallableTool2[Params]):
                 shell_name="Windows PowerShell" if self._is_powershell else "bash",
                 shell_path=str(self._shell_path),
                 cwd=str(self._runtime.session.work_dir),
+                interactive=params.interactive,
             )
         except Exception as exc:
             logger.error(

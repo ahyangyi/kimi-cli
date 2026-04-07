@@ -34,6 +34,7 @@ from kimi_cli.tools.background import (
     TaskList,
     TaskOutput,
     TaskStop,
+    TaskWrite,
 )
 from kimi_cli.tools.dmail import SendDMail
 from kimi_cli.tools.file.glob import Glob
@@ -277,6 +278,12 @@ def task_output_tool(runtime: Runtime) -> TaskOutput:
 def task_stop_tool(runtime: Runtime, approval: Approval) -> Generator[TaskStop]:
     with tool_call_context("TaskStop"):
         yield TaskStop(runtime, approval)
+
+
+@pytest.fixture
+def task_write_tool(runtime: Runtime) -> Generator[TaskWrite]:
+    with tool_call_context("TaskWrite"):
+        yield TaskWrite(runtime)
 
 
 @pytest.fixture

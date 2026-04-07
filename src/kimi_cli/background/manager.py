@@ -6,13 +6,14 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from kaos.local import local_kaos
 
 from kimi_cli.config import BackgroundConfig
-from kimi_cli.notifications import NotificationEvent, NotificationManager
+from kimi_cli.notifications import NotificationEvent, NotificationManager, NotificationSink
 from kimi_cli.session import Session
 from kimi_cli.utils.logging import logger
 
@@ -48,6 +49,8 @@ class BackgroundTaskManager:
         self._runtime: Runtime | None = None
         self._live_agent_tasks: dict[str, asyncio.Task[None]] = {}
         self._completion_event: asyncio.Event = asyncio.Event()
+        self._notification_targets_getter: Callable[[], tuple[NotificationSink, ...]] | None = None
+        self._observed_terminal_ids: set[str] = set()
 
     @property
     def completion_event(self) -> asyncio.Event:
@@ -68,14 +71,36 @@ class BackgroundTaskManager:
         return self._owner_role
 
     def copy_for_role(self, role: str) -> BackgroundTaskManager:
-        manager = BackgroundTaskManager(
+        copied = BackgroundTaskManager(
             self._session,
             self._config,
             notifications=self._notifications,
             owner_role=role,
         )
-        manager._runtime = self._runtime
-        return manager
+        copied._runtime = self._runtime
+        if self._notification_targets_getter is not None:
+            copied.bind_notification_targets(self._notification_targets_getter)
+        return copied
+
+    def bind_notification_targets(self, getter: Callable[[], tuple[NotificationSink, ...]]) -> None:
+        self._notification_targets_getter = getter
+
+    def mark_terminal_output_observed(self, task_id: str) -> None:
+        """Record that the LLM has already consumed terminal output for *task_id*.
+
+        * Any pending ``"llm"`` notification for this task is acked immediately.
+        * Future :meth:`publish_terminal_notifications` calls will omit the
+          ``"llm"`` target for this task.
+
+        Shell notifications are **not** affected.
+        """
+        self._observed_terminal_ids.add(task_id)
+        # Ack any already-published LLM notification for this task.
+        for view in self._notifications.store.list_views():
+            if view.event.source_kind == "background_task" and view.event.source_id == task_id:
+                sink_state = view.delivery.sinks.get("llm")
+                if sink_state is not None and sink_state.status != "acked":
+                    self._notifications.ack("llm", view.event.id)
 
     def bind_runtime(self, runtime: Runtime) -> None:
         self._runtime = runtime
@@ -89,9 +114,13 @@ class BackgroundTaskManager:
             raise RuntimeError("Background tasks are only supported on local sessions.")
 
     def _active_task_count(self) -> int:
-        return sum(
-            1 for view in self._store.list_views() if not is_terminal_status(view.runtime.status)
-        )
+        return self._store.count_active_runtimes(max_count=self._config.max_running_tasks)
+
+    def _notification_targets(self) -> list[NotificationSink]:
+        if self._notification_targets_getter is None:
+            return ["llm", "wire", "shell"]
+        targets = list(dict.fromkeys(self._notification_targets_getter()))
+        return targets or ["llm"]
 
     def _worker_command(self, task_dir: Path) -> list[str]:
         if getattr(sys, "frozen", False):
@@ -147,6 +176,7 @@ class BackgroundTaskManager:
         shell_name: str,
         shell_path: str,
         cwd: str,
+        interactive: bool = False,
     ) -> TaskView:
         self._ensure_root()
         self._ensure_local_backend()
@@ -167,6 +197,7 @@ class BackgroundTaskManager:
             shell_path=shell_path,
             cwd=cwd,
             timeout_s=timeout_s,
+            interactive=interactive,
         )
         self._store.create_task(spec)
 
@@ -297,17 +328,29 @@ class BackgroundTaskManager:
         max_bytes: int | None = None,
         max_lines: int | None = None,
     ) -> str:
-        self._store.merged_view(task_id)
-        return self._store.tail_output(
+        view = self._store.merged_view(task_id)
+        chunk = self._store.read_output_lines(
             task_id,
-            max_bytes=max_bytes or self._config.read_max_bytes,
-            max_lines=max_lines or self._config.notification_tail_lines,
+            None,  # tail mode
+            max_bytes or self._config.read_max_bytes,
+            status=view.runtime.status,
         )
+        if chunk.line_too_large:
+            return (
+                f'[Line too large \u2014 use TaskOutput(task_id="{task_id}") '
+                f'or ReadFile(path="{chunk.output_path}") to inspect the output.]'
+            )
+        text = chunk.text
+        if max_lines is not None and text:
+            lines = text.splitlines(keepends=True)
+            if len(lines) > max_lines:
+                text = "".join(lines[-max_lines:])
+        return text
 
     async def wait(self, task_id: str, *, timeout_s: int = 30) -> TaskView:
         end_time = time.monotonic() + timeout_s
         while True:
-            view = self._store.merged_view(task_id)
+            view = await asyncio.to_thread(self._store.merged_view, task_id)
             if is_terminal_status(view.runtime.status):
                 return view
             if time.monotonic() >= end_time:
@@ -333,6 +376,8 @@ class BackgroundTaskManager:
                 return
             if runtime.child_pid is not None:
                 os.kill(runtime.child_pid, signal.SIGTERM)
+            elif runtime.worker_pid is not None:
+                os.kill(runtime.worker_pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
         except Exception:
@@ -441,10 +486,12 @@ class BackgroundTaskManager:
                     if fresh_runtime.heartbeat_at is None
                     else "Background worker heartbeat expired"
                 )
+            self._best_effort_kill(fresh_runtime)
             self._store.write_runtime(view.spec.id, runtime)
 
     def reconcile(self, *, limit: int | None = None) -> list[str]:
         self.recover()
+        self._store.prune()
         return self.publish_terminal_notifications(limit=limit)
 
     def publish_terminal_notifications(self, *, limit: int | None = None) -> list[str]:
@@ -480,12 +527,23 @@ class BackgroundTaskManager:
                 f"Status: {status}",
                 f"Description: {view.spec.description}",
             ]
+            if view.spec.command:
+                body_lines.append(f"Command: {view.spec.command}")
+            if view.runtime.started_at:
+                end = view.runtime.finished_at or time.time()
+                body_lines.append(f"Duration: {end - view.runtime.started_at:.1f}s")
             if terminal_reason != status:
                 body_lines.append(f"Terminal reason: {terminal_reason}")
             if view.runtime.exit_code is not None:
                 body_lines.append(f"Exit code: {view.runtime.exit_code}")
             if view.runtime.failure_reason:
                 body_lines.append(f"Failure reason: {view.runtime.failure_reason}")
+
+            targets = self._notification_targets()
+            if view.spec.id in self._observed_terminal_ids:
+                targets: list[NotificationSink] = [t for t in targets if t != "llm"]
+                if not targets:
+                    continue
 
             event = NotificationEvent(
                 id=self._notifications.new_id(),
@@ -508,6 +566,7 @@ class BackgroundTaskManager:
                     "failure_reason": view.runtime.failure_reason,
                 },
                 dedupe_key=f"background_task:{view.spec.id}:{terminal_reason}",
+                targets=targets,
             )
             notification = self._notifications.publish(event)
             if notification.event.id == event.id:

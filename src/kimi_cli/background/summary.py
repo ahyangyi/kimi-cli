@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 from .manager import BackgroundTaskManager
 from .models import TaskView, is_terminal_status
 
@@ -34,6 +36,10 @@ def format_task(view: TaskView, *, include_command: bool = False) -> str:
         lines.append(f"exit_code: {view.runtime.exit_code}")
     if view.runtime.failure_reason:
         lines.append(f"reason: {view.runtime.failure_reason}")
+    if view.runtime.started_at:
+        end = view.runtime.finished_at or time.time()
+        elapsed = end - view.runtime.started_at
+        lines.append(f"elapsed_s: {elapsed:.1f}")
     return "\n".join(lines)
 
 
