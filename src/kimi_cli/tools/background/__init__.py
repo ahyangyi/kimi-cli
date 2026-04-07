@@ -1,11 +1,22 @@
+import os
 import time
+import uuid
 from pathlib import Path
 from typing import override
 
 from kosong.tooling import CallableTool2, ToolError, ToolReturnValue
 from pydantic import BaseModel, Field
 
-from kimi_cli.background import TaskView, format_task, format_task_list, list_task_views
+from kimi_cli.background import (
+    TaskOutputLineChunk,
+    TaskStatus,
+    TaskView,
+    format_task,
+    format_task_list,
+    is_terminal_status,
+    list_task_views,
+)
+from kimi_cli.background.worker import STDIN_QUEUE_DIR
 from kimi_cli.soul.agent import Runtime
 from kimi_cli.soul.approval import Approval
 from kimi_cli.tools.display import BackgroundTaskDisplayBlock
@@ -38,15 +49,10 @@ def _format_task_output(
     view: TaskView,
     *,
     retrieval_status: str,
-    output: str,
-    output_path: Path,
+    chunk: TaskOutputLineChunk,
     full_output_available: bool,
-    output_size_bytes: int,
-    output_preview_bytes: int,
-    output_truncated: bool,
 ) -> str:
     terminal_reason = "timed_out" if view.runtime.timed_out else view.runtime.status
-    output_path_str = str(output_path.resolve())
     lines = [
         f"retrieval_status: {retrieval_status}",
         f"task_id: {view.spec.id}",
@@ -72,32 +78,59 @@ def _format_task_output(
         lines.append(f"exit_code: {view.runtime.exit_code}")
     if view.runtime.failure_reason:
         lines.append(f"reason: {view.runtime.failure_reason}")
+    if view.runtime.started_at:
+        end = view.runtime.finished_at or time.time()
+        elapsed = end - view.runtime.started_at
+        lines.append(f"elapsed_s: {elapsed:.1f}")
     full_output_hint = (
         (
             "full_output_hint: "
-            f'Use ReadFile(path="{output_path_str}", line_offset=1, '
+            f'Use ReadFile(path="{chunk.output_path}", line_offset=1, '
             f"n_lines={TASK_OUTPUT_READ_HINT_LINES}) to inspect the full log. "
             "Increase line_offset to continue paging through the file."
         )
         if full_output_available
         else "full_output_hint: No output file is currently available for this task."
     )
+    output_truncated = chunk.has_before or chunk.has_after
     lines.extend(
         [
             "",
-            f"output_path: {output_path_str}",
-            f"output_size_bytes: {output_size_bytes}",
-            f"output_preview_bytes: {output_preview_bytes}",
+            f"output_path: {chunk.output_path}",
+            f"output_preview_start_line: {chunk.start_line}",
+            f"output_preview_end_line: {chunk.end_line}",
+            f"output_has_before: {str(chunk.has_before).lower()}",
+            f"output_has_after: {str(chunk.has_after).lower()}",
             f"output_truncated: {str(output_truncated).lower()}",
+        ]
+    )
+    if chunk.next_offset is not None:
+        lines.append(f"output_next_offset: {chunk.next_offset}")
+    lines.extend(
+        [
             "",
             f"full_output_available: {str(full_output_available).lower()}",
             "full_output_tool: ReadFile",
             full_output_hint,
         ]
     )
-    rendered_output = output or "[no output available]"
-    if output_truncated:
-        rendered_output = f"[Truncated. Full output: {output_path_str}]\n\n{rendered_output}"
+    if chunk.line_too_large:
+        rendered_output = (
+            f"[Line too large — line {chunk.start_line} exceeds the "
+            f"{TASK_OUTPUT_PREVIEW_BYTES // 1024} KiB preview limit. "
+            f'Use ReadFile(path="{chunk.output_path}") to inspect the output file directly.]'
+        )
+    elif not chunk.text:
+        rendered_output = "[no output available]"
+    elif output_truncated:
+        n_lines = chunk.end_line - chunk.start_line
+        last_line = chunk.end_line - 1
+        rendered_output = (
+            f"[Truncated — showing {n_lines} lines ({chunk.start_line}–{last_line})"
+            f". Full output: {chunk.output_path}]\n\n{chunk.text}"
+        )
+    else:
+        rendered_output = chunk.text
     return "\n".join(
         lines
         + [
@@ -111,7 +144,7 @@ def _format_task_output(
 class TaskOutputParams(BaseModel):
     task_id: str = Field(description="The background task ID to inspect.")
     block: bool = Field(
-        default=False,
+        default=True,
         description="Whether to wait for the task to finish before returning.",
     )
     timeout: int = Field(
@@ -119,6 +152,15 @@ class TaskOutputParams(BaseModel):
         ge=0,
         le=3600,
         description="Maximum number of seconds to wait when block=true.",
+    )
+    offset: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Line offset (0-based) to start reading output from. "
+            "If not set, reads the last lines that fit within ~32 KiB (tail). "
+            "Set to 0 to read from the beginning."
+        ),
     )
 
 
@@ -188,27 +230,18 @@ class TaskOutput(CallableTool2[TaskOutputParams]):
         super().__init__()
         self._runtime = runtime
 
-    def _render_output_preview(self, task_id: str) -> tuple[str, bool, int, int, bool, Path]:
-        manager = self._runtime.background_tasks
-        output_path = manager.resolve_output_path(task_id)
-        try:
-            output_size = output_path.stat().st_size if output_path.exists() else 0
-        except OSError:
-            output_size = 0
-        preview_offset = max(0, output_size - TASK_OUTPUT_PREVIEW_BYTES)
-        chunk = manager.read_output(
+    def _render_output_preview(
+        self, task_id: str, *, status: TaskStatus, offset: int | None = None
+    ) -> tuple[TaskOutputLineChunk, bool]:
+        output_path = self._runtime.background_tasks.store.output_path(task_id)
+        output_available = output_path.exists()
+        chunk = self._runtime.background_tasks.store.read_output_lines(
             task_id,
-            offset=preview_offset,
-            max_bytes=TASK_OUTPUT_PREVIEW_BYTES,
+            offset,
+            TASK_OUTPUT_PREVIEW_BYTES,
+            status=status,
         )
-        return (
-            chunk.text.rstrip("\n"),
-            output_size > 0,
-            output_size,
-            chunk.next_offset - chunk.offset,
-            preview_offset > 0,
-            output_path,
-        )
+        return chunk, output_available
 
     @override
     async def __call__(self, params: TaskOutputParams) -> ToolReturnValue:
@@ -236,17 +269,19 @@ class TaskOutput(CallableTool2[TaskOutputParams]):
                 else "not_ready"
             )
 
-        (
-            output,
-            full_output_available,
-            output_size,
-            output_preview_bytes,
-            output_truncated,
-            output_path,
-        ) = self._render_output_preview(params.task_id)
+        # Suppress the LLM completion reminder when TaskOutput already
+        # delivers the terminal result to the model.
+        if retrieval_status == "success":
+            self._runtime.background_tasks.mark_terminal_output_observed(params.task_id)
+
+        chunk, full_output_available = self._render_output_preview(
+            params.task_id,
+            status=view.runtime.status,
+            offset=params.offset,
+        )
         consumer = view.consumer.model_copy(
             update={
-                "last_seen_output_size": output_size,
+                "last_seen_output_size": chunk.end_line,
                 "last_viewed_at": time.time(),
             }
         )
@@ -257,12 +292,8 @@ class TaskOutput(CallableTool2[TaskOutputParams]):
             output=_format_task_output(
                 view,
                 retrieval_status=retrieval_status,
-                output=output,
-                output_path=output_path,
+                chunk=chunk,
                 full_output_available=full_output_available,
-                output_size_bytes=output_size,
-                output_preview_bytes=output_preview_bytes,
-                output_truncated=output_truncated,
             ),
             message=(
                 "Task snapshot retrieved."
@@ -314,5 +345,106 @@ class TaskStop(CallableTool2[TaskStopParams]):
             is_error=False,
             output=format_task(view, include_command=True),
             message="Task stop requested.",
+            display=[_task_display(self._runtime, params.task_id)],
+        )
+
+
+class TaskWriteParams(BaseModel):
+    task_id: str = Field(description="The background task ID to write to.")
+    input: str = Field(description="The text to write to the task's stdin.", max_length=1_048_576)
+    append_newline: bool = Field(
+        default=True,
+        description="Whether to append a newline after the input.",
+    )
+
+
+class TaskWrite(CallableTool2[TaskWriteParams]):
+    name: str = "TaskWrite"
+    description: str = load_desc(Path(__file__).parent / "write.md")
+    params: type[TaskWriteParams] = TaskWriteParams
+
+    def __init__(self, runtime: Runtime):
+        super().__init__()
+        self._runtime = runtime
+
+    @override
+    async def __call__(self, params: TaskWriteParams) -> ToolReturnValue:
+        if err := _ensure_root(self._runtime):
+            return err
+
+        view = self._runtime.background_tasks.get_task(params.task_id)
+        if view is None:
+            return ToolError(message=f"Task not found: {params.task_id}", brief="Task not found")
+
+        if not view.spec.interactive:
+            return ToolError(
+                message=f"Task {params.task_id} is not interactive. "
+                "Only tasks started with interactive=true accept stdin input.",
+                brief="Not interactive",
+            )
+
+        if is_terminal_status(view.runtime.status):
+            return ToolError(
+                message=(
+                    f"Task {params.task_id} has already finished (status: {view.runtime.status})."
+                ),
+                brief="Task finished",
+            )
+
+        if not view.runtime.stdin_ready:
+            return ToolError(
+                message=(
+                    f"Task {params.task_id} stdin is not ready yet (task may still be starting)."
+                ),
+                brief="Stdin not ready",
+            )
+
+        task_dir = self._runtime.background_tasks.store.task_dir(params.task_id)
+        queue_dir = task_dir / STDIN_QUEUE_DIR
+        if not queue_dir.exists():
+            return ToolError(
+                message="stdin queue directory does not exist.",
+                brief="Queue missing",
+            )
+
+        data = params.input
+        if params.append_newline:
+            data += "\n"
+        data_bytes = data.encode("utf-8")
+
+        msg_name = f"{time.time_ns()}_{uuid.uuid4().hex[:8]}.msg"
+        tmp_path = queue_dir / f".{msg_name}.tmp"
+        final_path = queue_dir / msg_name
+        try:
+            tmp_path.write_bytes(data_bytes)
+            os.replace(tmp_path, final_path)
+        except OSError as exc:
+            tmp_path.unlink(missing_ok=True)
+            return ToolError(
+                message=f"Failed to write to stdin queue: {exc}",
+                brief="Write failed",
+            )
+
+        return ToolReturnValue(
+            is_error=False,
+            output="\n".join(
+                [
+                    f"task_id: {params.task_id}",
+                    f"status: {view.runtime.status}",
+                    f"bytes_queued: {len(data_bytes)}",
+                    "result: input queued for delivery (~200ms)",
+                    "",
+                    "next_steps:",
+                    (
+                        f'  1. Use TaskOutput(task_id="{params.task_id}", block=false) '
+                        "to check for new output."
+                    ),
+                    (
+                        f'  2. Use TaskOutput(task_id="{params.task_id}", block=true, timeout=N) '
+                        "to wait for output."
+                    ),
+                ]
+            ),
+            message="Input written to task stdin.",
             display=[_task_display(self._runtime, params.task_id)],
         )

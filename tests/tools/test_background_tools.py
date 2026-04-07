@@ -122,7 +122,7 @@ async def test_task_output_returns_completed_output(
     assert "[output]" in result.output
     assert "build line 1" in result.output
     consumer = runtime.background_tasks.store.read_consumer(spec.id)
-    assert consumer.last_seen_output_size == len(b"build line 1\nbuild line 2\n")
+    assert consumer.last_seen_output_size == 2  # line count, not byte count
     assert consumer.last_viewed_at is not None
 
 
@@ -170,7 +170,7 @@ async def test_task_output_returns_not_ready_for_running_task(runtime, task_outp
 
 
 @pytest.mark.asyncio
-async def test_task_output_defaults_to_non_blocking_snapshot(runtime, task_output_tool):
+async def test_task_output_defaults_to_blocking(runtime, task_output_tool):
     spec = _write_task(
         runtime,
         "b6666668",
@@ -178,11 +178,12 @@ async def test_task_output_defaults_to_non_blocking_snapshot(runtime, task_outpu
         output="still working\n",
     )
 
-    result = await task_output_tool(task_output_tool.params(task_id=spec.id))
+    # Default is block=True; with timeout=0 the running task yields 'timeout'.
+    result = await task_output_tool(task_output_tool.params(task_id=spec.id, timeout=0))
 
     assert not result.is_error
-    assert result.message == "Task snapshot retrieved."
-    assert "retrieval_status: not_ready" in result.output
+    assert result.message == "Task output retrieved."
+    assert "retrieval_status: timeout" in result.output
     assert "status: running" in result.output
 
 
@@ -272,10 +273,10 @@ async def test_task_output_surfaces_truncated_preview_and_full_log_path(runtime,
     assert not result.is_error
     output_path = runtime.background_tasks.store.output_path(spec.id).resolve()
     assert f"output_path: {output_path}" in result.output
-    assert "output_preview_bytes: 32768" in result.output
-    assert f"output_size_bytes: {len(output.encode('utf-8'))}" in result.output
     assert "output_truncated: true" in result.output
-    assert f"[Truncated. Full output: {output_path}]" in result.output
+    assert "output_has_before:" in result.output
+    assert "output_preview_start_line:" in result.output
+    assert "output_preview_end_line:" in result.output
     assert "last marker" in result.output
     assert "first marker" not in result.output
     assert (
