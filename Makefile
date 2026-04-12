@@ -157,4 +157,15 @@ gen-docs: ## Generate user docs with Kimi Code CLI.
 	@echo "==> Generating user docs"
 	@uv run kimi --yolo --prompt /skill:gen-docs
 
+.PHONY: ahyangyi-fork ahyangyi-bump ahyangyi-x5iu-bump
+ahyangyi-fork: ## Bump ahyangyi fork branches to a new upstream version.
+	@echo "==> Running ahyangyi-fork skill"
+	@uv run kimi --yolo --prompt /skill:ahyangyi-fork
+ahyangyi-bump: ## Rebase all ahyangyi head-* branches onto upstream HEAD.
+	@echo "==> Running ahyangyi-bump skill"
+	@uv run kimi --yolo --prompt /skill:ahyangyi-bump
+ahyangyi-x5iu-bump: ## Rebase all ahyangyi x5iu-* branches onto upstream HEAD.
+	@echo "==> Running ahyangyi-x5iu-bump skill"
+	@uv run kimi --yolo --prompt /skill:ahyangyi-x5iu-bump
+
 include src/kimi_cli/deps/Makefile
