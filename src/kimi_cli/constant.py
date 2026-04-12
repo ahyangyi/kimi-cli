@@ -25,7 +25,7 @@ def get_version() -> str:
 
 @cache
 def get_user_agent() -> str:
-    return f"KimiCLI/{get_version()}"
+    return f"KimiCLI/{get_version()}; Ahyangyi's Fork"
 
 
 def _normalize_remote(url: str) -> str:
