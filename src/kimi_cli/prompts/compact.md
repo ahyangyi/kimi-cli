@@ -4,29 +4,38 @@
 The above is a list of messages in an agent conversation. You are now given a task to compact this conversation context according to specific priorities and rules.
 
 **Compression Priorities (in order):**
-1. **Current Task State**: What is being worked on RIGHT NOW
-2. **Errors & Solutions**: All encountered errors and their resolutions
-3. **Code Evolution**: Final working versions only (remove intermediate attempts)
-4. **System Context**: Project structure, dependencies, environment setup
-5. **Design Decisions**: Architectural choices and their rationale
-6. **TODO Items**: Unfinished tasks and known issues
+1. **Task State**: A hierarchical view of what the task is, from the highest level goal to the immediate task at hand
+2. **System Context**: Project structure, locations of important documents, proper commands / environment variables / keys / tokens for working
+3. **Design Decisions**: Architectural choices and their rationale
+4. **TODO Items**: Unfinished tasks and known issues
 
 **Compression Rules:**
-- MUST KEEP: Error messages, stack traces, working solutions, current task
+- MUST KEEP: Description for any task, including both current, ongoing and overarching ones. You should try to keep all details in task description, and do not discard any detail.
 - MERGE: Similar discussions into single summary points
 - REMOVE: Redundant explanations, failed attempts (keep lessons learned), verbose comments
-- CONDENSE: Long code blocks → keep signatures + key logic only
+- CONDENSE: Long code blocks → keep signatures; if code is on disk you should note its path; otherwise you might also include its key logic
 
 **Special Handling:**
-- For code: Keep full version if < 20 lines, otherwise keep signature + key logic
-- For errors: Keep full error message + final solution
-- For discussions: Extract decisions and action items only
+- For code: Keep full version if < 20 lines, otherwise keep signature + path / key logic
+- For errors: Keep full error message if the error still exists; otherwise discard entirely
+- For discussions: Merge repeated items, but do not discard any detail
+- For skills: if a skill is immediately useful, include its full content VERBATIM, including a header stating which skill it is. Otherwise DISCARD completely. There is no middle ground.
 
 **Required Output Structure:**
 
-<current_focus>
-[What we're working on now]
-</current_focus>
+<task_state>
+[Highest-level task state, including a brief of what was done, what's ongoing and what needs to be done
+</task_satte>
+
+<task_state>
+[Second-level task state]
+</task_satte>
+
+...
+
+<immediate_task_state>
+[State of the immediate task at hand]
+</immediate_task_satte>
 
 <environment>
 - [Key setup/config points]
@@ -46,7 +55,7 @@ The above is a list of messages in an agent conversation. You are now given a ta
 <code_state>
 
 <file>
-[filename]
+[filepath]
 
 **Summary:**
 [What this code file does]
@@ -54,10 +63,7 @@ The above is a list of messages in an agent conversation. You are now given a ta
 **Key elements:**
 - [Important functions/classes]
 - ...more...
-
-**Latest version:**
-[Critical code snippets in this file]
-</file>
+</filepath>
 
 <file>
 [filename]
